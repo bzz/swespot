@@ -20,6 +20,7 @@ dependencies = [
     "swesmith",
     "tddbench",
     "feaswebench",
+    "torchtune",
 ]
 
 [project.optional-dependencies]
@@ -56,3 +57,5 @@ mini-swe-agent = { path = "third_party/mini-swe-agent", editable = true }
 swebench = { path = "third_party/SWE-bench", editable = true }
 tddbench = { path = "third_party/TDD-Bench-Verified", editable = true }
 feaswebench = { path = "third_party/fea-swe-bench", editable = true }
+# pinned at upstream commit 41aaca46 (last commit before the torchao-nightly NF4 move — shim-free with stable torchao 0.17)
+torchtune = { path = "third_party/torchtune", editable = true }

@@ -1,0 +1,102 @@
+# torchtune single-device LoRA SFT — Qwen3-4B-Instruct-2507 on the Django-RCX mix.
+# Parity target: lora_django_trial.py (Tinker) / ms-swift Megatron.
+# Run (shim-free): see train/TORCHTUNE_SFT_GOAL.md "How to run".
+#
+# Knobs marked "# PARITY?" still need confirming against tinker_cookbook defaults
+# (they don't affect the memory/throughput headline; resolved in the parity step).
+
+output_dir: /home/alex/swespot/train/torchtune/outputs/torchtune/qwen3_4b_django_lora
+
+# ---- Model: custom 2507 builder (rope_base=5e6); tied embeddings => no LoRA on output ----
+model:
+  _component_: qwen3_2507_builder.lora_qwen3_4b_instruct_2507
+  lora_attn_modules: ['q_proj', 'k_proj', 'v_proj', 'output_proj']
+  apply_lora_to_mlp: True
+  apply_lora_to_output: False        # tie_word_embeddings=True forbids it (Tinker "unembed" LoRA can't be mirrored)
+  lora_rank: 128                     # matches the paper / trial r=128
+  lora_alpha: 16                     # matches Tinker server default (model_wrapper lora_alpha=16); scaling 16/128
+  lora_dropout: 0.0
+  max_seq_len: 32768
+
+# ---- Tokenizer: Qwen3 (vocab.json + merges.txt from the HF snapshot) ----
+tokenizer:
+  _component_: torchtune.models.qwen3.qwen3_tokenizer
+  path: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/vocab.json
+  merges_file: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/merges.txt
+  max_seq_len: 32768                 # = trial max_length; right-truncation
+  truncation_type: right
+
+# ---- Checkpointer: load the 2507 HF safetensors (Qwen3 uses the QWEN2 format) ----
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/
+  checkpoint_files: [
+    model-00001-of-00003.safetensors,
+    model-00002-of-00003.safetensors,
+    model-00003-of-00003.safetensors,
+  ]
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: QWEN2
+resume_from_checkpoint: False
+save_adapter_weights_only: True      # LoRA: write just the adapter
+
+# ---- Dataset: the pre-built 8039-example Django-RCX jsonl; assistant-only loss ----
+dataset:
+  _component_: torchtune.datasets.chat_dataset
+  source: json
+  data_files: /home/alex/swespot/train/torchtune/data/django_rcx_8039.jsonl
+  conversation_column: messages
+  conversation_style: openai
+  train_on_input: False              # mask non-assistant => ALL_ASSISTANT_MESSAGES parity
+  packed: False                      # one example per sequence (Tinker parity; packing measured separately)
+  split: train
+seed: 0
+shuffle: True
+batch_size: 1                        # micro-batch=1 (like Tinker's per-seq fwd/bwd)
+
+# ---- Loss: the memory-efficient fused linear CE (Part 2D) ----
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+  num_output_chunks: 16
+  # defaults: num_output_chunks=8, ignore_index=-100
+
+# ---- Optimizer / schedule ----
+optimizer:
+  _component_: torch.optim.AdamW
+  fused: True
+  weight_decay: 0.0                  # PARITY? Tinker LoRA likely 0
+  lr: 4.91e-4                        # = get_lr(Qwen3-4B, is_lora=True) ~ 10x full-FT
+lr_scheduler:
+  # Trial uses a "linear" schedule; torchtune ships only cosine-with-warmup.
+  # For 1 epoch (monotonic decay to ~0) the difference is minor — documented approximation.
+  _component_: torchtune.training.lr_schedulers.get_cosine_schedule_with_warmup
+  num_warmup_steps: 0
+optimizer_in_bwd: False              # incompatible with grad accumulation
+
+# ---- Training ----
+epochs: 1
+max_steps_per_epoch: null
+gradient_accumulation_steps: 8       # effective batch = 1*8 = 8 examples/step (Tinker parity)
+clip_grad_norm: null
+
+compile: False                       # toggled in the throughput sweep
+device: cuda
+dtype: bf16
+
+# ---- Memory knobs (Part 2D / throughput sweep) ----
+enable_activation_checkpointing: True
+enable_activation_offloading: True   # relief valve: 32k OOMs without this
+
+# ---- Logging: wandb ----
+metric_logger:
+  _component_: torchtune.training.metric_logging.WandBLogger
+  project: swespot
+  name: qwen3_4b_django_lora_torchtune
+log_every_n_steps: 1
+log_peak_memory_stats: True
+log_level: INFO
+
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: False
