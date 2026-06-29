@@ -7,6 +7,9 @@ preds.json
 .env
 traj.json
 
+# torchtune SFT data (large; regenerate with train/torchtune/prepare_django_rcx_data.py)
+/data/torchtune/
+
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 

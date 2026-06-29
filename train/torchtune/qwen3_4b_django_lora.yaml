@@ -45,7 +45,7 @@ save_adapter_weights_only: True      # LoRA: write just the adapter
 dataset:
   _component_: torchtune.datasets.chat_dataset
   source: json
-  data_files: /home/alex/swespot/train/torchtune/data/django_rcx_8039.jsonl
+  data_files: /home/alex/swespot/data/torchtune/django_rcx_8039.jsonl
   conversation_column: messages
   conversation_style: openai
   train_on_input: False              # mask non-assistant => ALL_ASSISTANT_MESSAGES parity
