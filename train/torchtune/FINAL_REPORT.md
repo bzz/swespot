@@ -202,133 +202,19 @@ primary cause of the original downstream mismatch. The "identical hyperparameter
 original comparison was never actually true at the optimizer level; once genuinely matched,
 torchtune's LoRA recipe reproduces (and here slightly exceeds) the ms-swift/Megatron result.
 
-**Winning config** (`final_lora_r128_lr5e-4_2ep_msmatched.yaml` — not committed to the repo as a
-separate file; inlined here for reproducibility):
+**Winning config:** [`final_lora_r128_lr5e-4_2ep_msmatched.yaml`](final_lora_r128_lr5e-4_2ep_msmatched.yaml)
+(committed alongside this report). To reproduce from scratch (2 epochs, ~14-15h on 2× A100-40):
 
-<details>
-<summary><code>final_lora_r128_lr5e-4_2ep_msmatched.yaml</code></summary>
-
-```yaml
-# Confirmatory run — F2 (r128, lr5e-4, 2ep) + ms-swift-matched optimizer/regularization knobs.
-# See FINAL_REPORT.md "Root-cause investigation - update" / "Phase 3 - matching TorchTune and
-# ms-swift" (this is the winning config: 23.1 +/- 2.5% pass@1 / 39.0% pass@5).
-# Isolates 4 previously-uncontrolled deltas vs the ms-swift reference (19.7% pass@1):
-#   lora_dropout 0.0->0.05, weight_decay 0.0->0.1, AdamW beta2 0.999(default)->0.95, clip_grad_norm None->1.0.
-# NOT changed: LR schedule (still cosine-to-0, not ms-swift's decay-to-floor) - that delta stays
-# untested in this pass so a positive result isn't confounded with the schedule-shape hypothesis.
-
-output_dir: /home/alex/swespot/train/torchtune/outputs/final_lora_r128_lr5e-4_2ep_msmatched
-
-# ---- Model: 2507 builder; LoRA on attn(q,k,v,o)+MLP; alpha=32 (blog standard + ref) ----
-model:
-  _component_: qwen3_2507_builder.lora_qwen3_4b_instruct_2507
-  lora_attn_modules: ['q_proj', 'k_proj', 'v_proj', 'output_proj']
-  apply_lora_to_mlp: True
-  apply_lora_to_output: False
-  lora_rank: 128
-  lora_alpha: 32
-  lora_dropout: 0.05                 # MATCHED to ms-swift default (was 0.0)
-  max_seq_len: 32768
-
-tokenizer:
-  _component_: torchtune.models.qwen3.qwen3_tokenizer
-  path: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/vocab.json
-  merges_file: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/merges.txt
-  max_seq_len: 32768
-  truncation_type: right
-
-checkpointer:
-  _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/
-  checkpoint_files: [
-    model-00001-of-00003.safetensors,
-    model-00002-of-00003.safetensors,
-    model-00003-of-00003.safetensors,
-  ]
-  recipe_checkpoint: null
-  output_dir: ${output_dir}
-  model_type: QWEN2
-resume_from_checkpoint: False
-save_adapter_weights_only: True
-
-# ---- Train data: the 8039 mix ----
-dataset:
-  _component_: torchtune.datasets.chat_dataset
-  source: json
-  data_files: /home/alex/swespot/data/torchtune/django_rcx_8039.jsonl
-  conversation_column: messages
-  conversation_style: openai
-  train_on_input: False
-  packed: False
-  split: train
-# ---- Held-out val proxy: 128-row strided subset (selection metric) ----
-dataset_val:
-  _component_: torchtune.datasets.chat_dataset
-  source: json
-  data_files: /home/alex/swespot/data/torchtune/django_rcx_val_128.jsonl
-  conversation_column: messages
-  conversation_style: openai
-  train_on_input: False
-  packed: False
-  split: train
-batch_size_val: 1
-seed: 0
-shuffle: True
-batch_size: 1
-
-loss:
-  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
-  num_output_chunks: 16              # Tier-1 winner (chunks barely affect tok/s; 16 keeps OOM margin)
-
-optimizer:
-  _component_: torch.optim.AdamW
-  fused: True
-  weight_decay: 0.1                  # MATCHED to ms-swift/Megatron default (was 0.0)
-  betas: [0.9, 0.95]                 # MATCHED to ms-swift/Megatron default (was torch default 0.999)
-  lr: 5e-4
-# ---- Cosine decay to ~0 with ~3% warmup (unchanged from F2 - schedule floor NOT matched here).
-#      2 epochs => ~2010 steps; 3% warmup ~= 60 steps.
-lr_scheduler:
-  _component_: torchtune.training.lr_schedulers.get_cosine_schedule_with_warmup
-  num_warmup_steps: 60
-  num_cycles: 0.5
-optimizer_in_bwd: False
-
-epochs: 2
-max_steps_per_epoch: null            # full epoch (~1005 steps/epoch, ~2010 total)
-gradient_accumulation_steps: 4       # global batch = 1 x 4 x 2 GPUs = 8
-clip_grad_norm: 1.0                  # MATCHED to ms-swift/Megatron clip_grad=1.0 (was null/none)
-
-compile: False
-device: cuda
-dtype: bf16
-
-# ---- Memory knobs: Tier-1 WINNER = offload ON + chunks 16 (validated baseline). ----
-enable_activation_checkpointing: True
-enable_activation_offloading: True
-
-# ---- Light periodic val on the 128-row held-out subset (monitoring only; real eval = sbv.sh) ----
-run_val_every_n_steps: 500
-
-metric_logger:
-  _component_: torchtune.training.metric_logging.WandBLogger
-  project: swespot_torchtune
-  name: final_lora_r128_lr5e-4_2ep_msmatched
-log_every_n_steps: 1
-log_peak_memory_stats: True
-log_level: INFO
-
-profiler:
-  _component_: torchtune.training.setup_torch_profiler
-  enabled: False
+```
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=train/torchtune \
+torchrun --nproc_per_node=2 train/torchtune/lora_finetune_distributed.py \
+  --config train/torchtune/final_lora_r128_lr5e-4_2ep_msmatched.yaml
 ```
 
-The first training attempt with this config was killed mid-epoch-2 by an external SIGTERM; it was
-resumed (not restarted) via a second invocation identical except `resume_from_checkpoint: True` —
-torchtune auto-discovers `output_dir/epoch_0`'s `recipe_state.pt` + `adapter_model.pt` and restores
-`epochs_run`/optimizer state/LR-scheduler position from there, so no separate config is needed
-beyond that one flag.
-</details>
+(An operational aside, not part of the recipe: this specific run happened to get killed mid-epoch-2
+by an external SIGTERM and was resumed rather than restarted — torchtune auto-resumes from
+`output_dir/epoch_N` given `resume_from_checkpoint: True`, nothing else changes — but a fresh
+from-scratch run needs no such flag.)
 
 ## Expectation vs outcome
 - ✅ LR is the lever, optimum high (~7e-4) — confirmed; the unswept reference's `5e-4` was near-optimal, `1e-4` far off.
@@ -456,9 +342,7 @@ section above for analysis of the gap vs 22.2%/40.7% target.
 - Sweep: `sweep_lora.yaml` + `run_sweep.sh` (7 runs, one detached driver). Analysis: `analyze.py`.
 - Finalists: `final_lora_r128_lr{7e-4,5e-4}_2ep.yaml` (from `final_lora_2ep_TEMPLATE.yaml`), driven
   by `run_finalists.sh`; eval via `run_eval.sh`.
-- Phase 3 (ms-swift-matched): `final_lora_r128_lr5e-4_2ep_msmatched.yaml` (full contents inlined
-  in the `<details>` block above — not committed as a standalone file) + a `_resume.yaml` variant
-  (only `resume_from_checkpoint: True` differs), driven by `run_confirmatory_resume.sh`; V0/V2
-  rescoring via `rescore_v0.sh`/`rescore_v2.sh`. Scoring concurrency fix: `eval/sbv.sh` flock.
+- Phase 3 (ms-swift-matched): `final_lora_r128_lr5e-4_2ep_msmatched.yaml` (committed alongside this
+  report — run command above). Scoring concurrency fix: `eval/sbv.sh` flock.
 - Env: `swespot/.venv` (torch 2.12.0+cu130, torchtune @ 67614f9, torchao 0.17.0). wandb project
   `swespot_torchtune`. Data: `data/torchtune/django_rcx_{8039,val,val_128}.jsonl` (seed-0 split).
