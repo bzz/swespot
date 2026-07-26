@@ -1,14 +1,14 @@
-# Confirmatory run — F2 (r128, lr5e-4, 2ep) + ms-swift-matched optimizer/regularization knobs.
-# See FINAL_REPORT.md "Root-cause investigation - update" / "Phase 3 - matching TorchTune and
-# ms-swift". NOTE: the first run of this exact config hit a checkpoint-resume bug (replayed both
-# epochs instead of resuming cleanly after a mid-training kill) - that 23.1%/39.0% result is
-# confounded. See Phase 3b in the report for the clean (resume_from_checkpoint: False) rerun.
+# Phase 3b — CLEAN rerun of final_lora_r128_lr5e-4_2ep_msmatched.yaml (byte-identical knobs, only
+# output_dir/metric_logger.name differ). The first run of that config hit a checkpoint-resume bug
+# (replayed both epochs instead of resuming cleanly after a mid-training kill), confounding its
+# 23.1%/39.0% result. This run is resume_from_checkpoint: False throughout - a genuine, clean
+# 2-epoch/1-LR-cycle run - to get the real, unconfounded number. See FINAL_REPORT.md "Phase 3b".
 # Isolates 4 previously-uncontrolled deltas vs the ms-swift reference (19.7% pass@1):
 #   lora_dropout 0.0->0.05, weight_decay 0.0->0.1, AdamW beta2 0.999(default)->0.95, clip_grad_norm None->1.0.
 # NOT changed: LR schedule (still cosine-to-0, not ms-swift's decay-to-floor) - that delta stays
 # untested in this pass so a positive result isn't confounded with the schedule-shape hypothesis.
 
-output_dir: /home/alex/swespot/train/torchtune/outputs/final_lora_r128_lr5e-4_2ep_msmatched
+output_dir: /home/alex/swespot/train/torchtune/outputs/final_lora_r128_lr5e-4_2ep_msmatched_clean
 
 # ---- Model: 2507 builder; LoRA on attn(q,k,v,o)+MLP; alpha=32 (blog standard + ref) ----
 model:
@@ -104,7 +104,7 @@ run_val_every_n_steps: 500
 metric_logger:
   _component_: torchtune.training.metric_logging.WandBLogger
   project: swespot_torchtune
-  name: final_lora_r128_lr5e-4_2ep_msmatched
+  name: final_lora_r128_lr5e-4_2ep_msmatched_clean
 log_every_n_steps: 1
 log_peak_memory_stats: True
 log_level: INFO
