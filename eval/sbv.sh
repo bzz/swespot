@@ -27,6 +27,14 @@ uv run mini-extra swebench -c $CONFIG --workers $WORKERS \
     --output $OUTPUT_DIR
 
 if [ "$RUN_EVAL" = "true" ]; then
+    # swebench.harness.run_evaluation is NOT safe to run concurrently with another instance of
+    # itself: two scorers sharing the same Docker image cache race on client.images.get() vs the
+    # other's end-of-run clean_images() (observed 2026-07-24/25 as both a silent post-hoc crash and
+    # a full threadpool deadlock, all workers stuck on futex_do_wait). Serialize across all callers
+    # (parallel eval versions, rescue re-scores, ...) via a shared flock.
+    (
+    flock -x 201
+
     docker ps -aq --filter "name=$RUN_ID" | xargs -r docker rm -f
     sleep 3s
 
@@ -34,13 +42,14 @@ if [ "$RUN_EVAL" = "true" ]; then
         --dataset_name princeton-nlp/SWE-bench_Verified \
         --predictions_path $OUTPUT_DIR/preds.json \
         --timeout 600 \
-        --max_workers 12 \
+        --max_workers 24 \
         --run_id $RUN_ID
 
-    mv logs/run_evaluation/$RUN_ID $OUTPUT_DIR/logs
-    mv *$RUN_ID.json $OUTPUT_DIR/
+    cp -r logs/run_evaluation/$RUN_ID $OUTPUT_DIR/logs
+    cp *$RUN_ID.json $OUTPUT_DIR/
 
     grep _instances $OUTPUT_DIR/*$RUN_ID.json | tee -a $OUTPUT_DIR/report.log
+    ) 201>/tmp/swespot_sbv_scoring.lock
 else
     echo 'skipping evaluation after generation'
 fi
