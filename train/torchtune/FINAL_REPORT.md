@@ -23,9 +23,11 @@ full 2-epoch training. Companion notes: `THROUGHPUT_TIER1_NOTE.md`, `LORA_SWEEP_
   masking/template/unembed/LoRA-scaling (all identical across pipelines) and found **4 real,
   previously-uncontrolled optimizer/regularization deltas** (`weight_decay`, AdamW `beta2`,
   gradient clipping, `lora_dropout`). **Phase 3** reran F2 with those matched: **23.1 ± 2.5%
-  pass@1 / 39.0% pass@5 — matches full-SFT (22.2%/40.7%) and beats the ms-swift LoRA reference
-  (19.7%/38.1%).** Confirmed: the gap was a training-recipe hyperparameter mismatch, not a
-  torchtune/framework limitation.
+  pass@1 / 39.0% pass@5** — matches full-SFT (22.2%/40.7%) and beats the ms-swift LoRA reference
+  (19.7%/38.1%). **⚠️ That run is confounded** (see "Phase 3" below): a checkpoint-resume bug
+  silently replayed both epochs instead of resuming cleanly, so the result reflects ~3 effective
+  epochs / two LR cycles, not the clean 2-epoch recipe described. A bug-free rerun is pending
+  before the hyperparameter-attribution claim can be trusted.
 
 ## Reference (ms-swift Megatron, unswept) — the bar to match
 | Run | N | pass@1 | pass@5 |
@@ -92,7 +94,7 @@ mild batch-size sensitivity.
 |---|---|---|---|
 | **F1 torchtune r128 lr7e-4 2ep** | **11.2 ± 4.0%** | **28.8%** | 16, 18, 15, 11, 6 |
 | **F2 torchtune r128 lr5e-4 2ep** | **7.8 ± 1.5%** | **11.9%** | 9, 7, 9, 9, 12 |
-| **F2-msmatched (Phase 3, see below)** | **23.1 ± 2.5%** | **39.0%** | 27, 33, 25, 25, 26 |
+| **F2-msmatched (Phase 3, ⚠️ confounded — see below)** | **23.1 ± 2.5%** | **39.0%** | 27, 33, 25, 25, 26 |
 | *Reference: Full SFT (ms-megatron)* | *22.2 ± 4.0%* | *40.7%* | — |
 | *Reference: LoRA r128 5e-4 (ms-megatron)* | *19.7 ± 3.0%* | *38.1%* | — |
 
@@ -150,7 +152,7 @@ high LR for 2 full epochs, lets the adapter drift further than the ms-swift run'
 setup, hurting generalization to held-out agentic tasks in a way that isn't visible in in-distribution
 held-out loss. This has **not been confirmed by a rerun yet** — see the confirmatory experiment below.
 
-### Phase 3 — matching TorchTune and ms-swift ✅ gap closed
+### Phase 3 — matching TorchTune and ms-swift ⚠️ confounded — clean rerun in progress
 
 Reran F2 (r128, lr5e-4, 2ep) as `final_lora_r128_lr5e-4_2ep_msmatched.yaml`: same config, only
 `weight_decay=0.0→0.1`, `optimizer.betas=[0.9,0.999]→[0.9,0.95]`, `clip_grad_norm=null→1.0`,
@@ -158,13 +160,26 @@ Reran F2 (r128, lr5e-4, 2ep) as `final_lora_r128_lr5e-4_2ep_msmatched.yaml`: sam
 LR-schedule floor delta (cosine-to-0 vs ms-swift's decay-to-10%-floor) was deliberately **left
 unmatched**, so a positive result couldn't be confused with fixing the schedule instead.
 
-**Training:** 2× A100-40 FSDP, same as before. The first attempt was killed by an external SIGTERM
-(session teardown) 5 steps into epoch 2, but epoch 1's checkpoint had already saved cleanly, so
-training resumed from `epoch_0` (torchtune's checkpointer auto-discovers `output_dir/epoch_0`'s
-`recipe_state.pt` + `adapter_model.pt` and correctly restores `epochs_run`/optimizer
-state/LR-scheduler position — confirmed in `_checkpoint_client.py`/`_checkpointer.py`) rather than
-restarting the full ~14.7h run. Final loss trajectory closely tracked F1/F2's (epoch-1 end ≈0.60,
-epoch-2 end ≈0.42-0.49) — no instability from removing weight decay/clipping.
+**Training — this run was confounded by a checkpoint-resume bug.** 2× A100-40 FSDP. The first
+attempt was killed by an external SIGTERM (session teardown) 5 steps into epoch 2; epoch 0's
+checkpoint had already saved, so training was resumed from it via a second invocation with
+`resume_from_checkpoint: True`. I initially wrote this off as a clean resume based on reading the
+checkpointer code, **without checking the actual saved state — that was wrong.**
+`lora_finetune_distributed.py` increments `self.epochs_run` (`:877`) *after* the epoch's training
+loop exits, but the epoch-boundary checkpoint save fires *inside* that loop's last iteration
+(`:858-862`) — so `epoch_0/recipe_state.pt` stores `epochs_run=0`, not `1` (confirmed directly:
+`torch.load(...)['epochs_run'] == 0`). On resume, `range(epochs_run, total_epochs)` became
+`range(0,2)`: **both epochs were silently replayed from scratch** on top of the already-trained
+weights, with the LR-scheduler warmup+cosine-decay also restarting from zero (matches the evidence:
+the "resume" took ~15h — nearly a full fresh 2-epoch run — instead of the ~7.5h one remaining epoch
+should take, and its log shows two full validation cycles, not one).
+
+**What this means:** the run evaluated below got ~3 effective epochs of exposure and two LR cycles,
+not the clean 2-epoch/1-cycle recipe the config specifies and ms-swift's reference used. The
+improvement over the original F2 (7.8%) is real, but conflates "more training" with "correct
+hyperparameters" — **the hyperparameter-attribution claim is not yet confirmed.** A genuinely clean
+from-scratch rerun (same config, `resume_from_checkpoint: False`) is in progress; this section will
+be updated with that result.
 
 **Eval:** `eval/sbv.sh` N=5, served via sglang as two independent DP=1 servers (one per GPU),
 versions split 3/2 across them for wall-clock parallelism (`MS=torchtune_qwen3_lora_lr5e-4_2ep_msmatched`).
@@ -183,7 +198,7 @@ prevented (not just a driver-discipline note) rather than merely staggering by h
 Also fixed a real, unrelated pre-existing bug in the same script: `cp` was missing `-r` for the
 per-instance-logs directory copy.
 
-**Result — gap closed:**
+**Result (confounded run — ~3 effective epochs, not the clean 2-epoch recipe):**
 | version | resolved/118 | pass@1 |
 |---|---:|---:|
 | V0 | 27 | 22.9% |
@@ -195,15 +210,14 @@ per-instance-logs directory copy.
 | **pass@5 (union resolved)** | 46 | **39.0%** |
 
 **23.1%/39.0%** — matches Full-SFT (22.2%/40.7%) and *beats* the ms-swift LoRA reference
-(19.7%/38.1%), up from the original F2's 7.8%/11.9%. This confirms the optimizer/regularization
-deltas (weight_decay, beta2, grad clipping, lora_dropout) — not masking, not LoRA scaling, not
-unembed, not serving, and not even the LR-schedule floor (left deliberately unmatched) — were the
-primary cause of the original downstream mismatch. The "identical hyperparameters" framing in the
-original comparison was never actually true at the optimizer level; once genuinely matched,
-torchtune's LoRA recipe reproduces (and here slightly exceeds) the ms-swift/Megatron result.
+(19.7%/38.1%), up from the original F2's 7.8%/11.9%. This is a strong signal that the
+optimizer/regularization deltas (weight_decay, beta2, grad clipping, lora_dropout) matter, but
+**cannot yet be attributed cleanly to them** vs. the extra training exposure from the resume bug —
+see the clean-rerun result below (or, if not yet landed, treat this as pending).
 
-**Winning config:** [`final_lora_r128_lr5e-4_2ep_msmatched.yaml`](final_lora_r128_lr5e-4_2ep_msmatched.yaml)
-(committed alongside this report). To reproduce from scratch (2 epochs, ~14-15h on 2× A100-40):
+**Winning config (the recipe under test):** [`final_lora_r128_lr5e-4_2ep_msmatched.yaml`](final_lora_r128_lr5e-4_2ep_msmatched.yaml)
+(committed alongside this report). To reproduce cleanly from scratch (2 epochs, ~14-15h on 2× A100-40,
+`resume_from_checkpoint: False` as already set in the file — no resume needed for a fresh run):
 
 ```
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=train/torchtune \
@@ -211,15 +225,16 @@ torchrun --nproc_per_node=2 train/torchtune/lora_finetune_distributed.py \
   --config train/torchtune/final_lora_r128_lr5e-4_2ep_msmatched.yaml
 ```
 
-(An operational aside, not part of the recipe: this specific run happened to get killed mid-epoch-2
-by an external SIGTERM and was resumed rather than restarted — torchtune auto-resumes from
-`output_dir/epoch_N` given `resume_from_checkpoint: True`, nothing else changes — but a fresh
-from-scratch run needs no such flag.)
+### Phase 3b — clean rerun (in progress)
+
+Launched a genuinely fresh run of the exact same config (`resume_from_checkpoint: False`, new
+`output_dir`/`MS` so the confounded run's checkpoint and eval results are preserved for reference)
+to get the real, unconfounded clean-2-epoch number. Result to be filled in here once it lands.
 
 ## Expectation vs outcome
 - ✅ LR is the lever, optimum high (~7e-4) — confirmed; the unswept reference's `5e-4` was near-optimal, `1e-4` far off.
 - ✅ Rank not capacity-bound at r≥64 — confirmed flat.
-- ❌→✅ **Downstream match initially failed** (F1 11.2%/28.8%, F2 7.8%/11.9%), root-caused to 4 uncontrolled optimizer/regularization hyperparameters (not serving, not eval harness, not masking/template — see "Root-cause investigation — update" above), then **confirmed and closed in Phase 3**: F2-msmatched reaches 23.1%/39.0%, matching Full-SFT and beating the ms-swift LoRA reference.
+- ❌→⚠️ **Downstream match initially failed** (F1 11.2%/28.8%, F2 7.8%/11.9%), root-caused to 4 uncontrolled optimizer/regularization hyperparameters (not serving, not eval harness, not masking/template — see "Root-cause investigation — update" above). Phase 3's rerun with those matched reached 23.1%/39.0% (matching Full-SFT, beating the ms-swift LoRA reference) but **that run was confounded by a checkpoint-resume bug** (replayed both epochs instead of resuming cleanly) — attribution to the hyperparameters alone is not yet confirmed; a clean rerun is in progress (Phase 3b).
 
 ## Engine comparison: ms-megatron (SWIFT) vs torchtune — wall-clock + why (code-grounded)
 Apples-to-apples (both r128, global batch 8 = micro 1 × accum 4 × DP 2, 2 epochs, 2× A100-40,
