@@ -22,12 +22,12 @@ full 2-epoch training. Companion notes: `THROUGHPUT_TIER1_NOTE.md`, `LORA_SWEEP_
   r/alpha/lr/epochs/batch vs the ms-swift reference (19.7%/38.1%). Root-cause audit ruled out
   masking/template/unembed/LoRA-scaling (all identical across pipelines) and found **4 real,
   previously-uncontrolled optimizer/regularization deltas** (`weight_decay`, AdamW `beta2`,
-  gradient clipping, `lora_dropout`). **Phase 3** reran F2 with those matched: **23.1 ± 2.5%
-  pass@1 / 39.0% pass@5** — matches full-SFT (22.2%/40.7%) and beats the ms-swift LoRA reference
-  (19.7%/38.1%). **⚠️ That run is confounded** (see "Phase 3" below): a checkpoint-resume bug
-  silently replayed both epochs instead of resuming cleanly, so the result reflects ~3 effective
-  epochs / two LR cycles, not the clean 2-epoch recipe described. A bug-free rerun is pending
-  before the hyperparameter-attribution claim can be trusted.
+  gradient clipping, `lora_dropout`). **Phase 3** reran F2 with those matched: 23.1 ± 2.5% pass@1 /
+  39.0% pass@5 — but that run's checkpoint-resume was buggy and silently replayed both epochs
+  (~3 effective epochs, two LR cycles), confounding the result. **Phase 3b, a genuinely clean
+  2-epoch rerun, confirms the fix on its own: 20.0 ± 0.9% pass@1 / 38.1% pass@5 — matching the
+  ms-swift LoRA reference almost exactly** (pass@5 identical, pass@1 within noise). The 4
+  hyperparameters alone, correctly applied, close the gap — no extra training was needed.
 
 ## Reference (ms-swift Megatron, unswept) — the bar to match
 | Run | N | pass@1 | pass@5 |
@@ -95,6 +95,7 @@ mild batch-size sensitivity.
 | **F1 torchtune r128 lr7e-4 2ep** | **11.2 ± 4.0%** | **28.8%** | 16, 18, 15, 11, 6 |
 | **F2 torchtune r128 lr5e-4 2ep** | **7.8 ± 1.5%** | **11.9%** | 9, 7, 9, 9, 12 |
 | **F2-msmatched (Phase 3, ⚠️ confounded — see below)** | **23.1 ± 2.5%** | **39.0%** | 27, 33, 25, 25, 26 |
+| **F2-msmatched-clean (Phase 3b, ✅ the confirmed result)** | **20.0 ± 0.9%** | **38.1%** | 25, 22, 24, 24, 23 |
 | *Reference: Full SFT (ms-megatron)* | *22.2 ± 4.0%* | *40.7%* | — |
 | *Reference: LoRA r128 5e-4 (ms-megatron)* | *19.7 ± 3.0%* | *38.1%* | — |
 
@@ -150,9 +151,9 @@ in the same range as the sweep), so this isn't a crash/instability bug — the l
 that **no weight decay + no gradient clipping on a 264M-param (r128) adapter**, trained at a fairly
 high LR for 2 full epochs, lets the adapter drift further than the ms-swift run's more-regularized
 setup, hurting generalization to held-out agentic tasks in a way that isn't visible in in-distribution
-held-out loss. This has **not been confirmed by a rerun yet** — see the confirmatory experiment below.
+held-out loss. **Confirmed by the clean rerun below (Phase 3b)** — see the confirmatory experiment.
 
-### Phase 3 — matching TorchTune and ms-swift ⚠️ confounded — clean rerun in progress
+### Phase 3 — matching TorchTune and ms-swift ⚠️ confounded (see Phase 3b below for the real result)
 
 Reran F2 (r128, lr5e-4, 2ep) as `final_lora_r128_lr5e-4_2ep_msmatched.yaml`: same config, only
 `weight_decay=0.0→0.1`, `optimizer.betas=[0.9,0.999]→[0.9,0.95]`, `clip_grad_norm=null→1.0`,
@@ -177,9 +178,9 @@ should take, and its log shows two full validation cycles, not one).
 **What this means:** the run evaluated below got ~3 effective epochs of exposure and two LR cycles,
 not the clean 2-epoch/1-cycle recipe the config specifies and ms-swift's reference used. The
 improvement over the original F2 (7.8%) is real, but conflates "more training" with "correct
-hyperparameters" — **the hyperparameter-attribution claim is not yet confirmed.** A genuinely clean
-from-scratch rerun (same config, `resume_from_checkpoint: False`) is in progress; this section will
-be updated with that result.
+hyperparameters." **See Phase 3b below: a clean rerun confirms the hyperparameters alone explain
+essentially all of the gain** — the extra epoch here added a modest additional boost but wasn't
+needed for the core fix.
 
 **Eval:** `eval/sbv.sh` N=5, served via sglang as two independent DP=1 servers (one per GPU),
 versions split 3/2 across them for wall-clock parallelism (`MS=torchtune_qwen3_lora_lr5e-4_2ep_msmatched`).
@@ -212,8 +213,8 @@ per-instance-logs directory copy.
 **23.1%/39.0%** — matches Full-SFT (22.2%/40.7%) and *beats* the ms-swift LoRA reference
 (19.7%/38.1%), up from the original F2's 7.8%/11.9%. This is a strong signal that the
 optimizer/regularization deltas (weight_decay, beta2, grad clipping, lora_dropout) matter, but
-**cannot yet be attributed cleanly to them** vs. the extra training exposure from the resume bug —
-see the clean-rerun result below (or, if not yet landed, treat this as pending).
+**cannot be attributed cleanly to them alone** vs. the extra training exposure from the resume bug
+— see Phase 3b below for the clean-rerun result that isolates them properly.
 
 **Winning config (the recipe under test):** [`final_lora_r128_lr5e-4_2ep_msmatched.yaml`](final_lora_r128_lr5e-4_2ep_msmatched.yaml)
 (committed alongside this report). To reproduce cleanly from scratch (2 epochs, ~14-15h on 2× A100-40,
@@ -225,16 +226,46 @@ torchrun --nproc_per_node=2 train/torchtune/lora_finetune_distributed.py \
   --config train/torchtune/final_lora_r128_lr5e-4_2ep_msmatched.yaml
 ```
 
-### Phase 3b — clean rerun (in progress)
+### Phase 3b — clean rerun ✅ gap closed, confirmed
 
-Launched a genuinely fresh run of the exact same config (`resume_from_checkpoint: False`, new
-`output_dir`/`MS` so the confounded run's checkpoint and eval results are preserved for reference)
-to get the real, unconfounded clean-2-epoch number. Result to be filled in here once it lands.
+Ran a genuinely fresh copy of the same config (`final_lora_r128_lr5e-4_2ep_msmatched_clean.yaml` —
+identical knobs, new `output_dir`/`MS` so the confounded run's checkpoint/eval results stay
+available for reference), `resume_from_checkpoint: False` throughout. **Verified clean this time**
+(per [[verify-evidence-before-claiming]], checked directly rather than inferred): the training log
+shows exactly 4 validation checkpoints (steps 500/1000/1500/2000) and a max global step of 2010 —
+one 2-epoch pass, one LR cycle. Wall-clock was 15h09m, consistent with F1's known clean-2-epoch time
+(14h43m) — not the confounded run's ~15h for what should have been a ~7.5h single-epoch resume.
+
+**Result:**
+| version | resolved/118 | pass@1 |
+|---|---:|---:|
+| V0 | 25 | 21.2% |
+| V1 | 22 | 18.6% |
+| V2 | 24 | 20.3% |
+| V3 | 24 | 20.3% |
+| V4 | 23 | 19.5% |
+| **pass@1 (mean ± pstdev)** | | **20.0 ± 0.9%** |
+| **pass@5 (union resolved)** | 45 | **38.1%** |
+
+**20.0%/38.1%** — this **essentially reproduces the ms-swift LoRA reference exactly**
+(19.7%/38.1% — pass@5 matches to the instance, pass@1 within noise), and closes most of the gap to
+Full-SFT (22.2%/40.7%), consistent with the original sweep goal's expectation that a residual gap
+vs. full fine-tuning would remain (unembed-LoRA omission, LoRA's batch-size sensitivity). Eval
+scoring had **zero races or deadlocks this run** — the `flock` fix in `eval/sbv.sh` worked as
+intended across all 5 versions.
+
+**Conclusion — the hyperparameter root-cause is now cleanly confirmed, not just suggestive:**
+matching `weight_decay`/`beta2`/`clip_grad_norm`/`lora_dropout` alone, with a correctly clean
+2-epoch run, takes torchtune's LoRA recipe from 7.8% to 20.0% pass@1 — matching ms-swift almost
+exactly. The earlier confounded run's higher number (23.1%/39.0%, ~3 effective epochs) suggests the
+extra training exposure added a modest additional boost on top of the hyperparameter fix, but that
+extra exposure was **not needed** to close the original gap — the 4 hyperparameters do essentially
+all of the work on their own, in a clean 2-epoch run matched to ms-swift's actual recipe.
 
 ## Expectation vs outcome
 - ✅ LR is the lever, optimum high (~7e-4) — confirmed; the unswept reference's `5e-4` was near-optimal, `1e-4` far off.
 - ✅ Rank not capacity-bound at r≥64 — confirmed flat.
-- ❌→⚠️ **Downstream match initially failed** (F1 11.2%/28.8%, F2 7.8%/11.9%), root-caused to 4 uncontrolled optimizer/regularization hyperparameters (not serving, not eval harness, not masking/template — see "Root-cause investigation — update" above). Phase 3's rerun with those matched reached 23.1%/39.0% (matching Full-SFT, beating the ms-swift LoRA reference) but **that run was confounded by a checkpoint-resume bug** (replayed both epochs instead of resuming cleanly) — attribution to the hyperparameters alone is not yet confirmed; a clean rerun is in progress (Phase 3b).
+- ❌→✅ **Downstream match initially failed** (F1 11.2%/28.8%, F2 7.8%/11.9%), root-caused to 4 uncontrolled optimizer/regularization hyperparameters (not serving, not eval harness, not masking/template — see "Root-cause investigation — update" above). Phase 3's first rerun (23.1%/39.0%) was confounded by a checkpoint-resume bug that replayed both epochs; **Phase 3b's clean rerun confirms the fix on its own: 20.0%/38.1%, matching the ms-swift LoRA reference almost exactly.** The hyperparameters alone explain the original gap.
 
 ## Engine comparison: ms-megatron (SWIFT) vs torchtune — wall-clock + why (code-grounded)
 Apples-to-apples (both r128, global batch 8 = micro 1 × accum 4 × DP 2, 2 epochs, 2× A100-40,
