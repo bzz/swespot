@@ -1,0 +1,93 @@
+# LOO ablation arm 2/4 (round 1) — reverts ONLY clip_grad_norm to torchtune's default; keeps
+# weight_decay, beta2, lora_dropout matched to ms-swift. See LOO_ABLATION_GOAL.md for the
+# pre-registered hypothesis (predicted large-effect knob: ~2-5pp drop in pass@1 vs the 20.0%
+# msmatched_clean baseline, possibly with higher across-version variance). Single-device recipe
+# (parallel with loo_wd0 on the other GPU): gradient_accumulation_steps raised 4->8 to preserve
+# global batch=8 with 1 GPU instead of 2. dataset_val/run_val_every_n_steps dropped -
+# lora_finetune_single_device.py doesn't support them.
+
+output_dir: /home/alex/swespot/train/torchtune/outputs/final_lora_r128_lr5e-4_2ep_loo_noclip
+
+model:
+  _component_: qwen3_2507_builder.lora_qwen3_4b_instruct_2507
+  lora_attn_modules: ['q_proj', 'k_proj', 'v_proj', 'output_proj']
+  apply_lora_to_mlp: True
+  apply_lora_to_output: False
+  lora_rank: 128
+  lora_alpha: 32
+  lora_dropout: 0.05                 # MATCHED (unchanged from msmatched_clean)
+  max_seq_len: 32768
+
+tokenizer:
+  _component_: torchtune.models.qwen3.qwen3_tokenizer
+  path: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/vocab.json
+  merges_file: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/merges.txt
+  max_seq_len: 32768
+  truncation_type: right
+
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/
+  checkpoint_files: [
+    model-00001-of-00003.safetensors,
+    model-00002-of-00003.safetensors,
+    model-00003-of-00003.safetensors,
+  ]
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: QWEN2
+resume_from_checkpoint: False
+save_adapter_weights_only: True
+
+dataset:
+  _component_: torchtune.datasets.chat_dataset
+  source: json
+  data_files: /home/alex/swespot/data/torchtune/django_rcx_8039.jsonl
+  conversation_column: messages
+  conversation_style: openai
+  train_on_input: False
+  packed: False
+  split: train
+seed: 0
+shuffle: True
+batch_size: 1
+
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+  num_output_chunks: 16
+
+optimizer:
+  _component_: torch.optim.AdamW
+  fused: True
+  weight_decay: 0.1                  # MATCHED (unchanged from msmatched_clean)
+  betas: [0.9, 0.95]                 # MATCHED (unchanged from msmatched_clean)
+  lr: 5e-4
+lr_scheduler:
+  _component_: torchtune.training.lr_schedulers.get_cosine_schedule_with_warmup
+  num_warmup_steps: 60
+  num_cycles: 0.5
+optimizer_in_bwd: False
+
+epochs: 2
+max_steps_per_epoch: null
+gradient_accumulation_steps: 8       # global batch = 1 x 8 x 1 GPU = 8 (was 4 x 2 GPUs)
+clip_grad_norm: null                 # REVERTED to torchtune default (was 1.0 in msmatched_clean)
+
+compile: False
+device: cuda
+dtype: bf16
+
+enable_activation_checkpointing: True
+enable_activation_offloading: True
+
+metric_logger:
+  _component_: torchtune.training.metric_logging.WandBLogger
+  project: swespot_torchtune
+  name: final_lora_r128_lr5e-4_2ep_loo_noclip
+log_every_n_steps: 1
+log_peak_memory_stats: True
+log_level: INFO
+
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: False

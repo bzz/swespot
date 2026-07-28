@@ -1,0 +1,95 @@
+# Memory/feasibility probe for the parallel-single-device LOO ablation (see LOO_ABLATION_GOAL.md
+# section 3). 40-step, 1-epoch throwaway run on ONE GPU, mirroring this project's own Tier-1
+# throughput-probe methodology (THROUGHPUT_TIER1_NOTE.md). Not a real training run - just checks
+# lora_finetune_single_device.py fits in 40GiB with the msmatched hyperparameters and gives a rough
+# per-step timing. Same knobs as final_lora_r128_lr5e-4_2ep_msmatched_clean.yaml except:
+#   - gradient_accumulation_steps: 4->8 (preserve global batch=8 with 1 GPU instead of 2: 1*8*1=8)
+#   - dataset_val/run_val_every_n_steps removed (lora_finetune_single_device.py doesn't support them)
+#   - max_steps_per_epoch: 40, epochs: 1 (probe only)
+#   - throwaway output_dir
+
+output_dir: /home/alex/swespot/train/torchtune/outputs/probe_single_device
+
+model:
+  _component_: qwen3_2507_builder.lora_qwen3_4b_instruct_2507
+  lora_attn_modules: ['q_proj', 'k_proj', 'v_proj', 'output_proj']
+  apply_lora_to_mlp: True
+  apply_lora_to_output: False
+  lora_rank: 128
+  lora_alpha: 32
+  lora_dropout: 0.05
+  max_seq_len: 32768
+
+tokenizer:
+  _component_: torchtune.models.qwen3.qwen3_tokenizer
+  path: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/vocab.json
+  merges_file: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/merges.txt
+  max_seq_len: 32768
+  truncation_type: right
+
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: /home/alex/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554/
+  checkpoint_files: [
+    model-00001-of-00003.safetensors,
+    model-00002-of-00003.safetensors,
+    model-00003-of-00003.safetensors,
+  ]
+  recipe_checkpoint: null
+  output_dir: ${output_dir}
+  model_type: QWEN2
+resume_from_checkpoint: False
+save_adapter_weights_only: True
+
+dataset:
+  _component_: torchtune.datasets.chat_dataset
+  source: json
+  data_files: /home/alex/swespot/data/torchtune/django_rcx_8039.jsonl
+  conversation_column: messages
+  conversation_style: openai
+  train_on_input: False
+  packed: False
+  split: train
+seed: 0
+shuffle: True
+batch_size: 1
+
+loss:
+  _component_: torchtune.modules.loss.LinearCrossEntropyLoss
+  num_output_chunks: 16
+
+optimizer:
+  _component_: torch.optim.AdamW
+  fused: True
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  lr: 5e-4
+lr_scheduler:
+  _component_: torchtune.training.lr_schedulers.get_cosine_schedule_with_warmup
+  num_warmup_steps: 60
+  num_cycles: 0.5
+optimizer_in_bwd: False
+
+epochs: 1
+max_steps_per_epoch: 40
+gradient_accumulation_steps: 8       # global batch = 1 x 8 x 1 GPU = 8
+clip_grad_norm: 1.0
+
+compile: False
+device: cuda
+dtype: bf16
+
+enable_activation_checkpointing: True
+enable_activation_offloading: True
+
+metric_logger:
+  _component_: torchtune.training.metric_logging.WandBLogger
+  project: swespot_torchtune
+  name: probe_single_device
+log_every_n_steps: 1
+log_peak_memory_stats: True
+log_level: INFO
+
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: False

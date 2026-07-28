@@ -75,6 +75,16 @@ project's own Tier-1 throughput-probe methodology) on one GPU before launching t
 - Run: `CUDA_VISIBLE_DEVICES=0 python train/torchtune/lora_finetune_single_device.py --config train/torchtune/probe_single_device.yaml` (~15-20 min).
 - **Gate:** if it completes without OOM and `GPU peak memory reserved` has reasonable headroom (comfortably under 40GiB) → proceed with the parallel-single-device plan below. If OOM or too tight → fall back to the proven sequential 2-GPU-FSDP pattern (byte-identical hypotheses/knob-diffs, just executed via `torchrun --nproc_per_node=2` + `lora_finetune_distributed.py` looped one arm at a time, exactly mirroring `run_msmatched_clean.sh`'s existing 4-phase structure).
 
+**Probe result (2026-07-28): PASSED.** 40/40 steps completed, no OOM, no errors. `GPU peak memory
+reserved: 34.10 GiB` / 40 GiB (85% utilized — real but workable headroom; this is a random-shuffle
+40-step sample, so a longer sequence later in the full 2010-step run could push this higher, but
+activation checkpointing caps most of the growth). Average **38.3s/step** — 2010 steps ≈ **21.4h**
+projected training time per arm (better than the ~30h worst-case estimate in §3, since the observed
+single-GPU slowdown vs. the 2-GPU run is closer to ~1.4x than 2x). **Decision: proceed with
+parallel single-device for round 1.** If a later OOM does occur mid-ablation on a longer sequence,
+treat it as that arm's failure per the driver's continue-on-failure design and re-run that one arm
+via the FSDP fallback rather than treating it as a plan failure.
+
 ## 4. Epoch scale — keep the full 2 epochs, don't truncate to 1
 
 Considered and rejected truncating each arm to 1 epoch (~26% cheaper: saves ~7.5h training per arm,
