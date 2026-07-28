@@ -248,11 +248,11 @@ one 2-epoch pass, one LR cycle. Wall-clock was 15h09m, consistent with F1's know
 | **pass@5 (union resolved)** | 45 | **38.1%** |
 
 **20.0%/38.1%** — this **essentially reproduces the ms-swift LoRA reference exactly**
-(19.7%/38.1% — pass@5 matches to the instance, pass@1 within noise), and closes most of the gap to
-Full-SFT (22.2%/40.7%), consistent with the original sweep goal's expectation that a residual gap
-vs. full fine-tuning would remain (unembed-LoRA omission, LoRA's batch-size sensitivity). Eval
-scoring had **zero races or deadlocks this run** — the `flock` fix in `eval/sbv.sh` worked as
-intended across all 5 versions.
+(19.7%/38.1% — pass@5 matches to the instance, pass@1 within noise). It's also close enough to
+Full-SFT (22.2%/40.7%) that the remaining gap (20.0±0.9% vs. 22.2±4.0%) is within the overlap of
+both confidence intervals — not a residual worth attributing to anything specific. Eval scoring had
+**zero races or deadlocks this run** — the `flock` fix in `eval/sbv.sh` worked as intended across
+all 5 versions.
 
 **Conclusion — the hyperparameter root-cause is now cleanly confirmed, not just suggestive:**
 matching `weight_decay`/`beta2`/`clip_grad_norm`/`lora_dropout` alone, with a correctly clean
